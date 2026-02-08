@@ -1,7 +1,10 @@
+import sys
 import time
 import pandas as pd
 import re
 import random
+import requests
+import io
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -11,7 +14,13 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 
-# --- LINK DI RICERCA ---
+# --- FIX ENCODING PER WINDOWS (Evita crash con emoji) ---
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
+# --- CONFIGURAZIONE ---
+SAFETY_LIMIT = 50 
+
 URLS = [
     "https://www.ibs.it/libri/ultima-settimana?useAsn=True&filterDepartment=Storia+e+archeologia",
     "https://www.ibs.it/libri/ultima-settimana?useAsn=True&filterDepartment=Società%2c+politica+e+comunicazione",
@@ -22,12 +31,25 @@ URLS = [
     "https://www.ibs.it/libri/ultima-settimana?useAsn=True&filterDepartment=Biografie"
 ]
 
+EDITORI_TARGET = [
+    "Adelphi", "Bollati Boringhieri", "Carabba", "Carocci", "Castelvecchi", 
+    "DeriveApprodi", "Donzelli", "Einaudi", "Feltrinelli", "Garzanti", 
+    "Giunti", "Gribaudo", "Hoepli", "Il Mulino", "Laterza", 
+    "Libreria Editrice Vaticana", "Longanesi", "Marsilio", "Mimesis", 
+    "Minimum Fax", "Mondadori", "Mondadori Electa", "Mondadori università", 
+    "Morcelliana", "Newton Compton", "Passigli", "Piemme", "Ponte alle Grazie", 
+    "Raffaello Cortina", "Rizzoli", "Ronzani", "Rubettino", "Rusconi libri", 
+    "San Paolo Edizioni", "Silvio Berlusconi Editore", "Solferino", 
+    "Sonzogno", "Sperling & Kupfer", "UTET", "Vallardi", "Vita e Pensiero"
+]
+
 def setup_driver():
     chrome_options = Options()
-    # Lascia commentato headless per vedere il browser lavorare (utile per debug)
+    # RIMOSSO --headless: Ora il browser sarà visibile
     # chrome_options.add_argument("--headless") 
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("--log-level=3") # Silenzia log inutili nel terminale
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     
     service = Service(ChromeDriverManager().install())
@@ -35,91 +57,68 @@ def setup_driver():
     return driver
 
 def get_single_book_description(driver, book_url):
-    """
-    FASE 2: Apre la pagina e cerca la descrizione dentro cc-em-content-body.
-    """
     if not book_url: return "N/D"
-    
     try:
-        # 1. Navigazione
         driver.get(book_url)
-        
-        # 2. Check caricamento (Aspetta il titolo H1)
         try:
-            WebDriverWait(driver, 8).until(
-                EC.presence_of_element_located((By.TAG_NAME, "h1"))
-            )
+            WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "h1")))
         except:
-            return "Errore Timeout Pagina"
+            return "Errore caricamento pagina"
         
-        # Pausa per rendering completo
-        time.sleep(random.uniform(1.0, 1.5))
-        
+        # Pausa tattica per simulare un utente umano che legge
+        time.sleep(random.uniform(1.0, 2.0))
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
-        # 3. RICERCA SPECIFICA RICHIESTA
-        # Cerca prima il contenitore padre: cc-em-content-body
         body_container = soup.find('div', class_='cc-em-content-body')
-        
         if body_container:
-            # Dentro il padre, cerca il div del testo (cc-content-text)
-            # Usiamo lambda per trovarlo anche se ha classi aggiuntive come 'cc-clamp', 'cc-open' etc.
             text_div = body_container.find('div', class_=lambda x: x and 'cc-content-text' in x)
-            
             if text_div:
                 html_content = text_div.decode_contents()
-                
-                # Logica <br>: Prendi testo dopo l'ultimo <br> per saltare il titolo ripetuto
                 if '<br' in html_content:
                     parts = re.split(r'<br\s*/?>', html_content)
                     raw_text = parts[-1] 
                     return BeautifulSoup(raw_text, 'html.parser').get_text(separator=' ', strip=True)
                 else:
                     return text_div.get_text(separator=' ', strip=True)
-        
-        return "Descrizione non trovata (Selettore errato o assente)"
 
+        desc_box = soup.find('div', id='description')
+        if desc_box:
+            text_div = desc_box.find('div', class_=lambda x: x and 'cc-content-text' in x)
+            if text_div:
+                return text_div.get_text(separator=' ', strip=True)
+
+        return "" 
     except Exception as e:
-        print(f"   Err: {e}")
-        return "Errore generico"
+        return ""
 
 def parse_list_page(driver, url):
-    print(f"\n--- Analisi Lista: {url} ---")
+    print(f"\n--- Analisi URL... ---")
     driver.get(url)
-    
     try:
-        # Cookie Banner
         try:
-            accept_btn = WebDriverWait(driver, 4).until(
-                EC.element_to_be_clickable((By.ID, "onetrust-accept-btn-handler"))
-            )
+            accept_btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((By.ID, "onetrust-accept-btn-handler")))
             accept_btn.click()
-            time.sleep(1)
-        except:
-            pass
+        except: pass
 
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "cc-product-list-item"))
-        )
-        
+        try:
+            WebDriverWait(driver, 4).until(EC.presence_of_element_located((By.CLASS_NAME, "cc-product-list-item")))
+        except:
+            return []
+
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-        time.sleep(1.5)
+        time.sleep(0.5)
         
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         cards = soup.find_all('div', class_='cc-product-list-item')
-        print(f"Libri trovati in lista: {len(cards)}")
         
-        books_in_page = []
+        books = []
         for card in cards:
             try:
-                # TITOLO
                 title_tag = card.find('a', class_='title') or card.find('a', href=True)
                 title = title_tag.get_text(strip=True) if title_tag else "N/D"
                 if len(title) < 2: continue 
-                
                 link = "https://www.ibs.it" + title_tag['href'] if title_tag and title_tag.has_attr('href') else ""
                 
-                # IMMAGINE
                 img_url = ""
                 img_col = card.find('div', class_='cc-col-img')
                 if img_col:
@@ -127,96 +126,124 @@ def parse_list_page(driver, url):
                     if img_tag:
                         img_url = img_tag.get('src') or img_tag.get('data-src') or ""
 
-                # AUTORE
                 author = "N/D"
                 auth_tag = card.find(class_='cc-author')
                 if auth_tag:
                     raw_auth = auth_tag.get_text(strip=True)
-                    # Toglie "di" all'inizio
                     author = re.sub(r'^di\s*', '', raw_auth, flags=re.IGNORECASE)
 
-                # EDITORE e ANNO
-                publisher = "N/D"
-                year = "N/D"
+                publisher, year = "N/D", "N/D"
                 pub_tag = card.find(class_='cc-publisher')
                 if pub_tag:
                     pub_text = pub_tag.get_text(strip=True)
                     match_year = re.search(r'(\d{4})$', pub_text)
                     if match_year:
                         year = match_year.group(1)
-                        # Toglie anno e virgola finale
                         publisher = pub_text[:match_year.start()].strip().rstrip(',').strip()
                     else:
                         publisher = pub_text.rstrip(',').strip()
 
-                u_id = (title + author).lower()
-                
-                books_in_page.append({
+                is_target = any(t.lower() in publisher.lower() for t in EDITORI_TARGET)
+                categoria_app = "Editori Selezionati" if is_target else "Altri Editori"
+
+                books.append({
                     'Copertina': img_url,
                     'Titolo': title,
                     'Autore': author,
                     'Editore': publisher,
                     'Anno': year,
                     'Link': link,
-                    'id_univoco': u_id,
-                    'Descrizione': '' # Placeholder per Fase 2
+                    'id_univoco': (title + author).lower(),
+                    'Descrizione': '',
+                    'Da_Scaricare': is_target, 
+                    'Categoria_App': categoria_app
                 })
-            except Exception:
-                continue
-        return books_in_page
-
+            except: continue
+        return books
     except Exception as e:
-        print(f"Errore parsing lista: {e}")
+        print(f"Errore parsing pagina: {e}")
         return []
 
+def save_excel_with_images(df, filename):
+    # FILTRO: Salviamo in Excel (che è pesante) SOLO i libri principali
+    df_excel = df[df['Categoria_App'] == 'Editori Selezionati'].copy()
+    
+    print(f"\n--- Generazione Excel ({len(df_excel)} libri selezionati) ---")
+    with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:
+        df_excel.to_excel(writer, index=False, sheet_name='Libri')
+        workbook = writer.book
+        worksheet = writer.sheets['Libri']
+        worksheet.set_column('A:A', 15)
+        worksheet.set_column('B:B', 35)
+        worksheet.set_column('C:E', 15)
+        worksheet.set_column('F:F', 50)
+        wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top'})
+        worksheet.set_column('B:G', None, wrap_format)
 
-        
+        for idx, row in df_excel.iterrows():
+            img_url = row['Copertina']
+            row_num = idx + 1
+            worksheet.set_row(row_num, 80)
+            if img_url and str(img_url).startswith('http'):
+                try:
+                    image_data = requests.get(img_url, timeout=5).content
+                    image_stream = io.BytesIO(image_data)
+                    worksheet.insert_image(row_num, 0, img_url, {'image_data': image_stream, 'x_scale': 0.5, 'y_scale': 0.5, 'object_position': 1})
+                except: pass
+    print(f"✅ Excel salvato (Solo Top Editori).")
+
 def main():
     driver = setup_driver()
     all_books_dict = {}
     
     try:
-        # FASE 1
-        print("=== FASE 1: RACCOLTA ELENCO ===")
-        for url in URLS:
-            found = parse_list_page(driver, url)
-            for b in found:
-                if b['id_univoco'] not in all_books_dict:
-                    all_books_dict[b['id_univoco']] = b
-            time.sleep(1)
+        print(f"=== FASE 1: SCANNING LISTE ===")
+        for base_url in URLS:
+            page_num = 1
+            while page_num <= SAFETY_LIMIT:
+                target_url = base_url if page_num == 1 else f"{base_url}&page={page_num}"
+                print(f"Url: ...{target_url[-40:]}")
+                found = parse_list_page(driver, target_url)
+                if not found: break
+                
+                new_books = 0
+                for b in found:
+                    if b['id_univoco'] not in all_books_dict:
+                        all_books_dict[b['id_univoco']] = b
+                        new_books += 1
+                
+                print(f"   -> {new_books} nuovi libri aggiunti.")
+                page_num += 1
+                time.sleep(0.5)
+
+        books_to_scrape = [b for b in all_books_dict.values() if b['Da_Scaricare']]
+        total_scrape = len(books_to_scrape)
         
-        # FASE 2
-        total = len(all_books_dict)
-        print(f"\n=== FASE 2: SCARICO DESCRIZIONI ({total} libri) ===")
+        print(f"\n=== FASE 2: SCARICO DETTAGLI ({total_scrape} libri VIP) ===")
         counter = 1
-        for uid, book in all_books_dict.items():
-            print(f"[{counter}/{total}] {book['Titolo'][:20]}...", end="")
+        for book in books_to_scrape:
+            uid = book['id_univoco']
+            print(f"\r[{counter}/{total_scrape}] {book['Titolo'][:30]}...", end="", flush=True)
             desc = get_single_book_description(driver, book['Link'])
             all_books_dict[uid]['Descrizione'] = desc
-            print(" -> OK")
             counter += 1
             
     finally:
         driver.quit()
-    
-    # EXPORT
+
     df = pd.DataFrame(list(all_books_dict.values()))
     if not df.empty:
-        df = df.drop(columns=['id_univoco'])
+        df_final = df.drop(columns=['id_univoco', 'Da_Scaricare'])
+        cols = ['Categoria_App', 'Copertina', 'Titolo', 'Autore', 'Editore', 'Anno', 'Descrizione', 'Link']
+        df_final = df_final[[c for c in cols if c in df_final.columns]]
         
-        # Riordino colonne
-        cols = ['Copertina', 'Titolo', 'Autore', 'Editore', 'Anno', 'Descrizione', 'Link']
-        df = df[[c for c in cols if c in df.columns]]
-        df = df.sort_values(by='Titolo')
-        
-        # 1. SALVIAMO IL CSV PER L'APP (Dati puri, link testuali)
+        # 1. CSV COMPLETO (Per l'App: contiene TUTTI)
         csv_filename = "dati_per_app.csv"
-        df.to_csv(csv_filename, index=False)
-        print(f"✅ File dati per App salvato: {csv_filename}")
+        df_final.to_csv(csv_filename, index=False)
+        print(f"\n\n✅ CSV COMPLETO salvato: {csv_filename} (Include tutti gli editori)")
         
-        # 2. SALVIAMO L'EXCEL CON IMMAGINI (Per consultazione umana)
-        save_excel_with_images(df, "novita_ibs_pro_images.xlsx")
-        
+        # 2. EXCEL FILTRATO (Solo i migliori, con immagini)
+        save_excel_with_images(df_final, "novita_ibs_filtrate.xlsx")
     else:
         print("\n❌ Nessun risultato.")
 
