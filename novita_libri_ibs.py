@@ -5,6 +5,7 @@ import re
 import random
 import requests
 import io
+import os  # Fondamentale per controllare se il file esiste
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -14,12 +15,12 @@ from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 
-# --- FIX ENCODING PER WINDOWS (Evita crash con emoji) ---
+# --- FIX ENCODING PER WINDOWS ---
 if sys.stdout.encoding != 'utf-8':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
     except AttributeError:
-        pass # Ignora su sistemi dove non serve
+        pass
 
 # --- CONFIGURAZIONE ---
 SAFETY_LIMIT = 50 
@@ -47,24 +48,19 @@ EDITORI_TARGET = [
 ]
 
 def setup_driver():
-    """
-    Configura il driver di Chrome per funzionare sia in locale
-    che su server headless (GitHub Actions/Linux).
-    """
+    """Configurazione Driver 'Blindata' per GitHub Actions"""
     chrome_options = Options()
     
-    # --- OPZIONI CRITICHE PER GITHUB ACTIONS ---
-    chrome_options.add_argument("--headless") # Esegue senza aprire la finestra grafica
-    chrome_options.add_argument("--no-sandbox") # Necessario per l'ambiente container di GitHub
-    chrome_options.add_argument("--disable-dev-shm-usage") # Risolve problemi di memoria condivisa su Linux
-    chrome_options.add_argument("--disable-gpu") # Disabilita l'accelerazione hardware (non serve su server)
-    chrome_options.add_argument("--window-size=1920,1080") # Simula uno schermo Full HD
+    # --- PARAMETRI CRITICI PER GITHUB ACTIONS ---
+    chrome_options.add_argument("--headless=new") 
+    chrome_options.add_argument("--no-sandbox") 
+    chrome_options.add_argument("--disable-dev-shm-usage") 
+    chrome_options.add_argument("--disable-gpu") 
+    chrome_options.add_argument("--window-size=1920,1080")
     
-    # --- OPZIONI ANTI-DETECTION (Maschera il bot) ---
+    # --- MASCHERAMENTO BOT ---
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
-    
-    # Silenzia i log inutili nel terminale
     chrome_options.add_argument("--log-level=3") 
     
     service = Service(ChromeDriverManager().install())
@@ -80,7 +76,6 @@ def get_single_book_description(driver, book_url):
         except:
             return "Errore caricamento pagina"
         
-        # Pausa tattica per simulare un utente umano che legge
         time.sleep(random.uniform(1.0, 2.0))
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         
@@ -208,7 +203,23 @@ def save_excel_with_images(df, filename):
     print(f"✅ Excel salvato (Solo Top Editori).")
 
 def main():
-    print("=== START SCRAPER (HEADLESS MODE) ===")
+    print("=== START SCRAPER (HEADLESS MODE + NEW ARRIVALS) ===")
+    
+    # 1. CARICAMENTO VECCHI DATI (Per confronto)
+    old_ids = set()
+    csv_filename = "dati_per_app.csv"
+    
+    if os.path.exists(csv_filename):
+        try:
+            df_old = pd.read_csv(csv_filename)
+            # Creiamo un ID univoco anche per i vecchi dati per confrontarli
+            if 'Titolo' in df_old.columns and 'Autore' in df_old.columns:
+                df_old['temp_id'] = (df_old['Titolo'].fillna('') + df_old['Autore'].fillna('')).str.lower().str.strip()
+                old_ids = set(df_old['temp_id'].unique())
+            print(f"📚 Trovati {len(old_ids)} libri già presenti nel database.")
+        except Exception as e:
+            print(f"⚠️ Impossibile leggere il vecchio CSV: {e}")
+
     driver = setup_driver()
     all_books_dict = {}
     
@@ -225,10 +236,13 @@ def main():
                 new_books = 0
                 for b in found:
                     if b['id_univoco'] not in all_books_dict:
+                        # ### LOGICA NUOVI ARRIVI ###
+                        b['Nuovo'] = b['id_univoco'] not in old_ids
+                        
                         all_books_dict[b['id_univoco']] = b
                         new_books += 1
                 
-                print(f"   -> {new_books} nuovi libri aggiunti.")
+                print(f"   -> {new_books} libri trovati nella pagina.")
                 page_num += 1
                 time.sleep(0.5)
 
@@ -250,17 +264,19 @@ def main():
     df = pd.DataFrame(list(all_books_dict.values()))
     if not df.empty:
         df_final = df.drop(columns=['id_univoco', 'Da_Scaricare'])
-        cols = ['Categoria_App', 'Copertina', 'Titolo', 'Autore', 'Editore', 'Anno', 'Descrizione', 'Link']
-        df_final = df_final[[c for c in cols if c in df_final.columns]]
+        # Assicuriamoci che la colonna 'Nuovo' sia inclusa e sia boolean
+        cols = ['Categoria_App', 'Copertina', 'Titolo', 'Autore', 'Editore', 'Anno', 'Descrizione', 'Link', 'Nuovo']
+        existing_cols = [c for c in cols if c in df_final.columns]
+        df_final = df_final[existing_cols]
         
-        # 1. CSV COMPLETO (Per l'App: contiene TUTTI)
-        csv_filename = "dati_per_app.csv"
+        # Salvataggio
         df_final.to_csv(csv_filename, index=False)
-        print(f"\n\n✅ CSV COMPLETO salvato: {csv_filename} (Include tutti gli editori)")
+        print(f"\n\n✅ CSV AGGIORNATO: {csv_filename}")
         
-        # 2. EXCEL FILTRATO (Solo i migliori, con immagini)
-        # Nota: L'excel su Github Actions serve a poco se non lo carichi da qualche parte,
-        # ma lo lascio se vuoi scaricarlo come Artifact o analizzarlo localmente.
+        if 'Nuovo' in df_final.columns:
+            num_new = df_final['Nuovo'].sum()
+            print(f"🆕 Nuovi inserimenti rilevati rispetto a ieri: {num_new}")
+        
         save_excel_with_images(df_final, "novita_ibs_filtrate.xlsx")
     else:
         print("\n❌ Nessun risultato.")
