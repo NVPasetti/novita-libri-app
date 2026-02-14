@@ -16,7 +16,10 @@ from bs4 import BeautifulSoup
 
 # --- FIX ENCODING PER WINDOWS (Evita crash con emoji) ---
 if sys.stdout.encoding != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8')
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass # Ignora su sistemi dove non serve
 
 # --- CONFIGURAZIONE ---
 SAFETY_LIMIT = 50 
@@ -44,13 +47,25 @@ EDITORI_TARGET = [
 ]
 
 def setup_driver():
+    """
+    Configura il driver di Chrome per funzionare sia in locale
+    che su server headless (GitHub Actions/Linux).
+    """
     chrome_options = Options()
-    # RIMOSSO --headless: Ora il browser sarà visibile
-    # chrome_options.add_argument("--headless") 
+    
+    # --- OPZIONI CRITICHE PER GITHUB ACTIONS ---
+    chrome_options.add_argument("--headless") # Esegue senza aprire la finestra grafica
+    chrome_options.add_argument("--no-sandbox") # Necessario per l'ambiente container di GitHub
+    chrome_options.add_argument("--disable-dev-shm-usage") # Risolve problemi di memoria condivisa su Linux
+    chrome_options.add_argument("--disable-gpu") # Disabilita l'accelerazione hardware (non serve su server)
+    chrome_options.add_argument("--window-size=1920,1080") # Simula uno schermo Full HD
+    
+    # --- OPZIONI ANTI-DETECTION (Maschera il bot) ---
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--start-maximized")
-    chrome_options.add_argument("--log-level=3") # Silenzia log inutili nel terminale
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    
+    # Silenzia i log inutili nel terminale
+    chrome_options.add_argument("--log-level=3") 
     
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -193,6 +208,7 @@ def save_excel_with_images(df, filename):
     print(f"✅ Excel salvato (Solo Top Editori).")
 
 def main():
+    print("=== START SCRAPER (HEADLESS MODE) ===")
     driver = setup_driver()
     all_books_dict = {}
     
@@ -243,6 +259,8 @@ def main():
         print(f"\n\n✅ CSV COMPLETO salvato: {csv_filename} (Include tutti gli editori)")
         
         # 2. EXCEL FILTRATO (Solo i migliori, con immagini)
+        # Nota: L'excel su Github Actions serve a poco se non lo carichi da qualche parte,
+        # ma lo lascio se vuoi scaricarlo come Artifact o analizzarlo localmente.
         save_excel_with_images(df_final, "novita_ibs_filtrate.xlsx")
     else:
         print("\n❌ Nessun risultato.")
