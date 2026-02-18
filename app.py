@@ -119,7 +119,7 @@ with tab1:
                 
                 desc = str(row.get('Descrizione', ''))
                 if len(desc) > 10 and desc.lower() != "nan":
-                    with st.expander("📖 Leggi trama"):
+                    with st.expander("📖 Leggi sinossi"):
                         st.write(desc)
                 
                 link = row.get('Link')
